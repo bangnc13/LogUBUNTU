@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#000;color:#00ff41;font-family:"Courier New",monospace;overflow:hidden}
+#rain{position:fixed;inset:0;opacity:.28}
+#bar{position:fixed;top:0;left:0;right:0;height:46px;display:flex;align-items:center;gap:8px;padding:0 10px;background:rgba(0,10,0,.85);border-bottom:1px solid #00ff4155;z-index:3;font-size:13px}
+#bar .t{flex:1;text-shadow:0 0 6px #00ff41}
+#dot{width:10px;height:10px;border-radius:50%;background:#f33;box-shadow:0 0 8px #f33}
+#dot.on{background:#0f4;box-shadow:0 0 8px #0f4}
+button{background:#001a00;color:#00ff41;border:1px solid #00ff4177;border-radius:4px;padding:6px 9px;font:inherit;font-size:12px}
+#tabs{position:fixed;top:46px;left:0;right:0;height:38px;display:flex;gap:6px;align-items:center;overflow-x:auto;padding:0 8px;background:rgba(0,10,0,.8);border-bottom:1px solid #00ff4133;z-index:3;white-space:nowrap}
+#tabs button{flex:none;padding:5px 11px}
+#tabs button.on{background:#00ff41;color:#001a00;font-weight:bold;box-shadow:0 0 10px #00ff41}
+#log{position:fixed;top:84px;bottom:0;left:0;right:0;overflow-y:auto;padding:8px 10px 20px;z-index:2;font-size:12px;line-height:1.45}
+.line{white-space:pre-wrap;word-break:break-all;text-shadow:0 0 5px #00ff41;animation:in .25s}
+.line.err{color:#ff4d4d;text-shadow:0 0 5px #f00}
+.line.warn{color:#ffd24d;text-shadow:0 0 5px #fa0}
+.line.sys{color:#7dffb0;opacity:.7}
+@keyframes in{from{opacity:0;transform:translateX(-6px)}to{opacity:1}}
+#cfg{position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:5;display:none;flex-direction:column;justify-content:center;gap:10px;padding:24px}
+#cfg input{background:#001a00;color:#00ff41;border:1px solid #00ff4177;padding:10px;font:inherit;border-radius:4px}
+</style></head><body>
+<canvas id="rain"></canvas>
+<div id="bar"><div id="dot"></div><div class="t">ZALOPHU://LOG</div>
+<button id="bp">PAUSE</button><button id="bc">CLEAR</button><button id="bs">⚙</button></div>
+<div id="tabs"></div>
+<div id="log"></div>
+<div id="cfg">
+  <div>&gt; SERVER URL (vd: http://192.168.1.50:8765)</div>
+  <input id="iu" autocapitalize="off" autocomplete="off">
+  <div>&gt; TOKEN</div>
+  <input id="it" autocapitalize="off" autocomplete="off">
+  <button id="bk">SAVE &amp; CONNECT</button>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const logEl=$('log'),MAX=600;
+let cfg={};try{cfg=JSON.parse(localStorage.getItem('cfg')||'{}')}catch(e){}
+let es=null,queue=[],paused=false,stick=true;
+
+// --- Matrix rain ---
+const cv=$('rain'),cx=cv.getContext('2d');let cols,drops;
+function rs(){cv.width=innerWidth;cv.height=innerHeight;cols=Math.floor(cv.width/14);drops=Array(cols).fill(1)}
+rs();addEventListener('resize',rs);
+const chars='ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉ0123456789ZALOPHU';
+setInterval(()=>{
+  cx.fillStyle='rgba(0,0,0,.08)';cx.fillRect(0,0,cv.width,cv.height);
+  cx.fillStyle='#00ff41';cx.font='14px monospace';
+  for(let i=0;i<cols;i++){
+    cx.fillText(chars[Math.floor(Math.random()*chars.length)],i*14,drops[i]*14);
+    if(drops[i]*14>cv.height&&Math.random()>.975)drops[i]=0;drops[i]++;
+  }
+},50);
+
+// --- Log ---
+function addLine(txt,cls){
+  const d=document.createElement('div');
+  d.className='line'+(cls?' '+cls:'');
+  if(!cls){
+    if(/error|exception|traceback|fail|lỗi/i.test(txt))d.classList.add('err');
+    else if(/warn|cảnh báo|timeout/i.test(txt))d.classList.add('warn');
+  }
+  d.textContent=txt;logEl.appendChild(d);
+  while(logEl.childElementCount>MAX)logEl.removeChild(logEl.firstChild);
+  if(stick)logEl.scrollTop=logEl.scrollHeight;
+}
+logEl.addEventListener('scroll',()=>{stick=logEl.scrollTop+logEl.clientHeight>=logEl.scrollHeight-30});
+(function pump(){
+  if(!paused&&queue.length){
+    const n=queue.length>300?25:queue.length>80?6:queue.length>20?2:1;
+    for(let i=0;i<n&&queue.length;i++)addLine(queue.shift());
+  }
+  setTimeout(pump,45);
+})();
+
+// --- Connect ---
+function setSt(on){$('dot').className=on?'on':''}
+function base(){return cfg.url.replace(/\/$/,'')}
+let svcList=[],active=localStorage.getItem('active')||'',gen=0;
+function renderTabs(){
+  const t=$('tabs');t.innerHTML='';
+  svcList.forEach(n=>{
+    const b=document.createElement('button');b.textContent=n;
+    if(n===active)b.className='on';
+    b.onclick=()=>{select(n)};t.appendChild(b);
+  });
+}
+function select(n){
+  active=n;localStorage.setItem('active',n);renderTabs();
+  logEl.innerHTML='';queue=[];stick=true;openStream();
+}
+function openStream(){
+  if(es){es.close();es=null}
+  if(!active)return;
+  const my=++gen;
+  addLine('> '+active+' ...','sys');
+  es=new EventSource(base()+'/stream?svc='+encodeURIComponent(active)+'&token='+encodeURIComponent(cfg.token||''));
+  es.onopen=()=>setSt(true);
+  es.onmessage=e=>queue.push(e.data);
+  es.onerror=()=>{setSt(false);if(es&&es.readyState===2&&my===gen){addLine('> mất kết nối, thử lại 5s','sys');setTimeout(()=>{if(my===gen)openStream()},5000)}};
+}
+async function loadServices(first){
+  if(!cfg.url){$('cfg').style.display='flex';return}
+  try{
+    const r=await fetch(base()+'/services?token='+encodeURIComponent(cfg.token||''));
+    if(!r.ok)throw new Error(r.status);
+    const l=await r.json();setSt(true);
+    if(JSON.stringify(l)!==JSON.stringify(svcList)){
+      svcList=l;
+      if(!svcList.includes(active))active=svcList[0]||'';
+      renderTabs();
+      if(first||!es)openStream();
+    }
+  }catch(e){setSt(false);if(first)addLine('> không kết nối được server: '+e,'sys')}
+}
+function connect(){loadServices(true)}
+setInterval(()=>loadServices(false),30000);
+$('bp').onclick=()=>{paused=!paused;$('bp').textContent=paused?'RESUME':'PAUSE'};
+$('bc').onclick=()=>{logEl.innerHTML='';queue=[]};
+$('bs').onclick=()=>{$('iu').value=cfg.url||'';$('it').value=cfg.token||'';$('cfg').style.display='flex'};
+$('bk').onclick=()=>{
+  cfg={url:$('iu').value.trim(),token:$('it').value.trim()};
+  localStorage.setItem('cfg',JSON.stringify(cfg));
+  $('cfg').style.display='none';if(es){es.close();es=null}svcList=[];connect();
+};
+connect();
+</script></body></html>
